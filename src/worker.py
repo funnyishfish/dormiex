@@ -138,12 +138,18 @@ class TwitchEventSub(DurableObject):
 				if event["chatter_user_id"] == "19264788":
 					message_text = event["message"]["text"]
 
-					match = re.search(r"nemimi has apologized (\d+) times!", message_text)
+					sorry_match = re.search(r"nemimi has apologized (\d+) times!", message_text)
+					dude_match = re.search(r"nemimi has said dude (\d+) times!", message_text)
 
-					if match:
-						sorry_count = match.group(1)
+
+					if sorry_match:
+						sorry_count = sorry_match.group(1)
 						await self.webhook_report(f"new sorry count: {sorry_count}")
 						await self.env.STREAM_DATA.put("sorry_count", sorry_count)
+					elif dude_match:
+						dude_count = dude_match.group(1)
+						await self.webhook_report(f"new dude count: {dude_count}")
+						await self.env.STREAM_DATA.put("dude_count", dude_count)
 			elif sub_type == "session_keepalive":
 				pass
 
@@ -314,7 +320,7 @@ class TwitchEventSub(DurableObject):
 
 		webhook_body = {
 			"username": self.env.WEBHOOK_USERNAME,
-			"avatar_url": self.env.WEBHOOK_AVATAR,
+			"avatar_url": await self.env.STREAM_DATA.get("avatar_url"),
 			"content": log_string
 		}
 
@@ -323,6 +329,26 @@ class TwitchEventSub(DurableObject):
 			headers={"Content-Type": "application/json"},
 			body=json.dumps(webhook_body)
 		)
+
+	async def get_avatar(self):
+		discord_user_id = self.env.DISCORD_USER_ID
+		discord_bot_token = self.env.DISCORD_BOT_TOKEN
+		response = await fetch(
+				f"https://discord.com/api/v10/users/{discord_user_id}",
+				method="GET",
+				headers={
+					'User-Agent': "DiscordBot (dormiex, 2_of_them)",
+					'Authorization': f"Bot {discord_bot_token}",
+					'Content-Type': "application/json"
+				}
+			)
+		data = await request.json()
+		avatar_hash = data.get("avatar")
+		ext = "gif" if avatar_hash.startswith("a_") else "png"
+		avatar_url = f"https://cdn.discordapp.com/avatars/{discord_user_id}/{avatar_hash}.{ext}?size=1024"
+		if await self.env.STREAM_DATA.get("avatar_url") != avatar_url:
+			await self.webhook_report(f"new avatar hash: {avatar_hash}")
+			await self.env.STREAM_DATA.put("avatar_url", avatar_url)
 
 	async def refresh_all(self):
 		await self.ensureConnected()
@@ -348,12 +374,13 @@ class Default(WorkerEntrypoint):
 
 		if url.pathname == "/api/status":
 			import asyncio
-			is_live, offline_timestamp, sorry_count, next_stream, playlist_items_raw = await asyncio.gather(
+			is_live, offline_timestamp, sorry_count, next_stream, playlist_items_raw, dude_count = await asyncio.gather(
 				self.env.STREAM_DATA.get('is_live'),
 				self.env.STREAM_DATA.get('offline_timestamp'),
 				self.env.STREAM_DATA.get('sorry_count'),
 				self.env.STREAM_DATA.get('next_stream'),
-				self.env.STREAM_DATA.get('playlist_items')
+				self.env.STREAM_DATA.get('playlist_items'),
+				self.env.STREAM_DATA.get('dude_count')
 			)
 
 			response_data = {
@@ -361,7 +388,8 @@ class Default(WorkerEntrypoint):
 				"offlineTimestamp": offline_timestamp,
 				"sorryCount": sorry_count,
 				"nextStream": next_stream,
-				"playlist": json.loads(playlist_items_raw) if playlist_items_raw else []
+				"playlist": json.loads(playlist_items_raw) if playlist_items_raw else [],
+				"dudeCount": dude_count
 			}
 
 			return Response.new(
@@ -397,6 +425,8 @@ class Default(WorkerEntrypoint):
 		elif cron_pattern == "*/20 * * * *":
 			await stub.webhook_report("[cron]getting next stream")
 			await stub.getNextStream()
+			await stub.webhook_report("[cron]checking avatar hash")
+			await stub.get_avatar()
 		elif cron_pattern == "0 0 * * *":
 			await stub.webhook_report("[cron]fetching playlist info")
 			await stub.getPlaylist()
